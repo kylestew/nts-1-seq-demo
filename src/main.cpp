@@ -5,7 +5,7 @@ NTS1 nts1;
 
 // -- HARDWARE UI pin definitiions and state ------------------------------------------
 enum { sw_0 = 0, sw_1, sw_2, sw_3, sw_4, sw_5, sw_6, sw_7, sw_8, sw_9, sw_count };
-const uint8_t sw_pins[sw_count] = {PC8, PC6, PC5, PA12, PA11, PB11, PB2, PB1, PC4, PF5};
+const uint8_t g_sw_pins[sw_count] = {PC8, PC6, PC5, PA12, PA11, PB11, PB2, PB1, PC4, PF5};
 
 enum {
     sw_step0 = sw_0,
@@ -23,11 +23,16 @@ enum {
 enum { led0 = 0, led1, led2, led3, led4, led5, led6, led7, ledCount };
 const uint8_t g_led_pins[ledCount] = {PC10, PC12, PF6, PF7, PA15, PB7, PC13, PC14};
 
+enum { vr_0 = 0, vr_count };
+const uint8_t g_vr_pins[vr_count] = {PC2};
+
 typedef struct {
     HardwareTimer* timer;
-} UIState;
+    uint32_t steps_pressed;
+    bool is_shift_pressed;
+} ui_state_t;
 
-UIState g_ui_state = {.timer = NULL};
+ui_state_t g_ui_state = {.timer = NULL, .steps_pressed = 0x0, .is_shift_pressed = false};
 
 // -- SEQUENCER definitions and state -------------------------------------------------
 
@@ -72,13 +77,12 @@ void scan_switches(unsigned long now_us) {
     static uint32_t last_sw_sample_us;
     static uint32_t last_sw_state = 0;
     static uint8_t sw_chatter[sw_count] = {0};
-    uint32_t sw_events = 0;
 
-    if (now_us - last_sw_sample_us) {
+    if (now_us - last_sw_sample_us > 1000) {
+        // read in switch values
         uint32_t sw_state = 0;
-
         for (uint8_t i = 0; i < sw_count; ++i) {
-            const uint32_t val = digitalRead(sw_pins[i]);
+            const uint32_t val = digitalRead(g_sw_pins[i]);
             const uint32_t lastVal = ((last_sw_state >> i) & 0x1);
             if (val != lastVal) {
                 if (++sw_chatter[i] > 6) {
@@ -95,10 +99,9 @@ void scan_switches(unsigned long now_us) {
             }
         }
 
+        // change detected?
         if (last_sw_state != sw_state) {
-            // change detected
-
-            sw_events = sw_state ^ last_sw_state;
+            uint32_t sw_events = sw_state ^ last_sw_state;
 
             // check for play switch event
             static const uint32_t k_play_sw_mask = (1U << sw_play);
@@ -113,7 +116,10 @@ void scan_switches(unsigned long now_us) {
             }
 
             // check for shift switch event
-            //...
+            static const uint32_t k_shift_sw_mask = (1U << sw_shift);
+            if (sw_events & k_shift_sw_mask) {
+                g_ui_state.is_shift_pressed = (sw_state & k_shift_sw_mask) == 0;  // active low
+            }
 
             // check for step switch events
             static const uint32_t k_step_sw_mask = ((1U << sw_8) - 1);
@@ -122,9 +128,14 @@ void scan_switches(unsigned long now_us) {
                 const uint32_t new_presses = (~sw_state) & step_sw_events;
                 const uint32_t released = sw_state & step_sw_events;
 
-                // set/unset sequencer gates
-                g_seq_state.gates ^= new_presses >> sw_step0;
-                set_step_leds(g_seq_state.gates);
+                if (g_ui_state.is_shift_pressed) {
+                    // set/unset sequencer gates
+                    g_seq_state.gates ^= new_presses >> sw_step0;
+                    set_step_leds(g_seq_state.gates);
+                }
+
+                g_ui_state.steps_pressed |= new_presses;
+                g_ui_state.steps_pressed &= ~(released);
             }
         }
 
@@ -133,9 +144,14 @@ void scan_switches(unsigned long now_us) {
     }
 }
 
+void scan_pots(unsigned long now_us) {
+    // TODO: remaining - scan pot and implement its actions
+}
+
 void scan_interrupt_handler(void) {
     unsigned long us = micros();
     scan_switches(us);
+    scan_pots(us);
 }
 
 // -- SEQUENCER Runtime ---------------------------------------------------------------
@@ -227,7 +243,7 @@ HardwareTimer* setup_timer(TIM_TypeDef* timer, uint32_t refresh_hz, void (*inter
 void setup() {
     // init switches & LEDs
     for (uint8_t i = 0; i < sw_count; ++i) {
-        pinMode(sw_pins[i], INPUT_PULLUP);
+        pinMode(g_sw_pins[i], INPUT_PULLUP);
     }
     for (uint8_t i = 0; i < ledCount; ++i) {
         pinMode(g_led_pins[i], OUTPUT);
