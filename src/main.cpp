@@ -23,8 +23,8 @@ enum {
 enum { led0 = 0, led1, led2, led3, led4, led5, led6, led7, ledCount };
 const uint8_t g_led_pins[ledCount] = {PC10, PC12, PF6, PF7, PA15, PB7, PC13, PC14};
 
-enum { vr_0 = 0, vr_count };
-const uint8_t g_vr_pins[vr_count] = {PC2};
+enum { pot_0 = 0, pot_count };
+const uint8_t g_pot_pins[pot_count] = {PC2};
 
 typedef struct {
     HardwareTimer* timer;
@@ -60,7 +60,7 @@ seq_state_t g_seq_state = {.timer = NULL,
                            .step = 0xFF,   // invalid
                            .note = 0xFF,   // invalid
                            .flags = 0x00,  // none
-                           .gates = 0xFF,  // 1 bit per step, all on
+                           .gates = 0x11,  // 1 bit per step, all on
                            .tempo = 1200,  // 120.0 x 10
                            .notes = {0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42},
                            .is_playing = false};
@@ -144,8 +144,75 @@ void scan_switches(unsigned long now_us) {
     }
 }
 
+void handle_pot_0(int16_t value) {
+    static int32_t last_tempo_pot_val = 0xFFFFFFFF;
+    static int32_t last_shape_pot_val = 0xFFFFFFFF;
+
+    if (g_ui_state.steps_pressed) {
+        // set note if a step button is currently pressed
+        uint8_t note = value >> 3;  /// 10 bit ADC to 7 bit note value
+        for (uint8_t i = sw_step0; i <= sw_step7; ++i) {
+            // only effect selected (pressed) notes
+            if (g_ui_state.steps_pressed & (1U << i)) {
+                // TODO: scales!
+                g_seq_state.notes[i] = note;
+            }
+        }
+    } else if (g_ui_state.is_shift_pressed) {
+        // change tempo when shift is pressed
+        if (last_tempo_pot_val == 0xFFFFFFFF || (abs(value - last_tempo_pot_val) > 10)) {
+            // 4 - 260 BPM in 0.5 increments
+            g_seq_state.tempo = 40 + (value >> 1) * 5 + (value & 0x1) * 5;
+            last_tempo_pot_val = value;
+        }
+    } else {
+        // Change SHAPE by default
+        if (last_shape_pot_val == 0xFFFFFFFF || (abs(value - last_shape_pot_val) > 10)) {
+            nts1.paramChange(k_param_id_osc_shape, k_invalid_param_subid, value);
+            last_shape_pot_val = value;
+        }
+    }
+}
+
 void scan_pots(unsigned long now_us) {
-    // TODO: remaining - scan pot and implement its actions
+    static uint32_t last_pot_sample_us = 0;
+    static uint32_t last_pot_states[pot_count] = {0};
+    static uint8_t pot_chatter[pot_count] = {0};
+
+    if (now_us - last_pot_sample_us > 1000) {
+        for (uint8_t i = 0; i < pot_count; ++i) {
+            int32_t pot_state = 0;
+            const int32_t val = analogRead(g_pot_pins[i]);
+            const int32_t last_val = last_pot_states[i];
+            if (val != last_val) {
+                if (++pot_chatter[i] > 4) {
+                    pot_state = val;
+                    pot_chatter[i] = 0;
+                } else {
+                    pot_state = last_val;
+                }
+            } else {
+                pot_chatter[i] = 0;
+                pot_state = last_val;
+            }
+
+            if (last_val == pot_state) {
+                last_pot_sample_us = now_us;
+                continue;
+            }
+
+            switch (i) {
+                case pot_0:
+                    handle_pot_0(pot_state & 0x3FF);
+                    break;
+                default:
+                    break;
+            }
+
+            last_pot_states[i] = pot_state;
+        }
+        last_pot_sample_us = now_us;
+    }
 }
 
 void scan_interrupt_handler(void) {
@@ -258,7 +325,7 @@ void setup() {
     g_ui_state.timer = setup_timer(TIM1, 200, scan_interrupt_handler);
 
     // setup hardware timer for sequencer
-    g_seq_state.timer = setup_timer(TIM3, 200, seq_interrupt_handler);
+    g_seq_state.timer = setup_timer(TIM3, 20000, seq_interrupt_handler);
 
     // start timers
     g_ui_state.timer->resume();
