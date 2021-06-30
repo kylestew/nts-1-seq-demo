@@ -1,7 +1,12 @@
 #include <Arduino.h>
 #include <nts-1.h>
+#include <quantizer.h>
+#include <quantizer_scales.h>
 
 NTS1 nts1;
+
+using namespace braids;
+Quantizer quantizer;
 
 // -- HARDWARE UI pin definitiions and state ------------------------------------------
 enum { sw_0 = 0, sw_1, sw_2, sw_3, sw_4, sw_5, sw_6, sw_7, sw_8, sw_9, sw_count };
@@ -60,7 +65,7 @@ seq_state_t g_seq_state = {.timer = NULL,
                            .step = 0xFF,   // invalid
                            .note = 0xFF,   // invalid
                            .flags = 0x00,  // none
-                           .gates = 0x11,  // 1 bit per step, all on
+                           .gates = 0x55,  // 1 bit per step, all on
                            .tempo = 1200,  // 120.0 x 10
                            .notes = {0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42},
                            .is_playing = false};
@@ -154,7 +159,6 @@ void handle_pot_0(int16_t value) {
         for (uint8_t i = sw_step0; i <= sw_step7; ++i) {
             // only effect selected (pressed) notes
             if (g_ui_state.steps_pressed & (1U << i)) {
-                // TODO: scales!
                 g_seq_state.notes[i] = note;
             }
         }
@@ -223,6 +227,19 @@ void scan_interrupt_handler(void) {
 
 // -- SEQUENCER Runtime ---------------------------------------------------------------
 
+// NOTE: Pitches are bit shifted 7 positions for accurracy
+
+int32_t note_to_pitch(uint8_t noteNumber) {
+    return 440.0 * std::pow(2.0, ((double)noteNumber - 69) / 12.0);
+    //  * 128;
+}
+
+uint8_t pitch_to_note(uint32_t pitch) {
+    // n  =  12*log2(fn/440 Hz).
+    // return 12 * std::log2((pitch / (440 << 7) >> 7));
+    return 12 * std::log2((double)pitch / 440.0) + 69;
+}
+
 void seq_interrupt_handler() {
     uint32_t now_us = micros();
 
@@ -268,7 +285,13 @@ void seq_interrupt_handler() {
         cur_step = (cur_step + 1) % k_seq_length;
         g_seq_state.ticks = 0;
 
-        const uint8_t note = g_seq_state.notes[cur_step];
+        uint8_t note = g_seq_state.notes[cur_step];
+        // quantize note on fly so we can change scales quickly
+        // braids is looking for a pitch, not a MIDI note
+        // TODO: convert internally to pitch values
+        int32_t pitch = note_to_pitch(note);
+        pitch = quantizer.Process(pitch, 60 << 7);
+        note = pitch_to_note(pitch);
 
         if (g_seq_state.gates & (1U << cur_step)) {
             // send note on event to NTS-1
@@ -317,6 +340,9 @@ void setup() {
     }
 
     nts1.init();
+    quantizer.Init();
+
+    quantizer.Configure(scales[2]);
 
     // init UI state
     set_step_leds(g_seq_state.gates);
